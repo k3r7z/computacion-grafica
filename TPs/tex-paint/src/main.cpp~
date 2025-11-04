@@ -1,0 +1,449 @@
+#include <algorithm>
+#include <stdexcept>
+#include <vector>
+#include <string>
+#include <glad/glad.h>
+#include <GLFW/glfw3.h>
+#include <glm/glm.hpp>
+#include <glm/ext.hpp>
+#include "Model.hpp"
+#include "Window.hpp"
+#include "Callbacks.hpp"
+#include "Debug.hpp"
+#include "Shaders.hpp"
+
+#define VERSION 20250901
+
+Window main_window; // ventana principal: muestra el modelo en 3d sobre el que se pinta
+Window aux_window; // ventana auxiliar que muestra la textura
+
+void drawMain(); // dibuja el modelo "normalmente" para la ventana principal
+void drawBack(); // dibuja el modelo con un shader alternativo para convertir coords de la ventana a coords de textura
+void drawAux(); // dibuja la textura en la ventana auxiliar
+void drawImGui(Window &window); // settings sub-window
+
+float radius = 5; // radio del "pincel" con el que pintamos en la textura
+glm::vec4 color = { 0.f, 0.f, 0.f, 1.f }; // color actual con el que se pinta en la textura
+
+Texture texture; // textura (compartida por ambas ventanas)
+Image image; // imagen (para la textura, Image está en RAM, Texture la envía a GPU)
+
+Model model_chookity; // el objeto a pintar, para renderizar en la ventan principal
+Model model_aux; // un quad para cubrir la ventana auxiliar y mostrar la textura
+
+Shader shader_main; // shader para el objeto principal (drawMain)
+Shader shader_back; // shader alternativo para el objeto principal (drawBack)
+Shader shader_aux; // shader para la ventana auxiliar (drawTexture)
+struct MousePosition {double x; double y;};
+struct Punto {double x; double y;};
+
+
+
+// callbacks del mouse y auxiliares para los callbacks
+enum class MouseAction { None, ManipulateView, Draw };
+MouseAction mouse_action = MouseAction::None; // qué hacer en el callback del motion si el botón del mouse está apretado
+void mainMouseMoveCallback(GLFWwindow* window, double xpos, double ypos);
+void mainMouseButtonCallback(GLFWwindow* window, int button, int action, int mods);
+void auxMouseMoveCallback(GLFWwindow* window, double xpos, double ypos);
+void auxMouseButtonCallback(GLFWwindow* window, int button, int action, int mods);
+
+
+
+void drawLine(Punto p1, Punto p2, bool flag);
+void drawCircle(Punto p1, bool fix);
+
+Punto oposition, cposition, cmodelPosition, omodelPosition;
+
+bool show_drawMain = true;
+
+int main() {
+	// main window (3D view)
+	main_window = Window(800, 600, "Main View", true);
+	glfwSetCursorPosCallback(main_window, mainMouseMoveCallback);
+	glfwSetMouseButtonCallback(main_window, mainMouseButtonCallback);
+	main_window.getCamera().model_angle = 2.5;
+	
+	glClearColor(1.f,1.f,1.f,1.f);
+	shader_main = Shader("shaders/main");
+    shader_back = Shader("shaders/back");
+	
+	image = Image("models/chookity.png",true);
+	texture = Texture(image);
+	
+	model_chookity = Model::loadSingle("models/chookity", Model::fNoTextures);
+	
+	// aux window (texture image)
+	aux_window = Window(512,512, "Texture", true, main_window);
+	glfwSetCursorPosCallback(aux_window, auxMouseMoveCallback);
+	glfwSetMouseButtonCallback(aux_window, auxMouseButtonCallback);
+	
+	model_aux = Model::loadSingle("models/texquad", Model::fNoTextures);
+	shader_aux = Shader("shaders/quad");
+	
+	// main loop
+	do {
+		glfwPollEvents();
+
+		glfwMakeContextCurrent(main_window);
+	    if (show_drawMain)
+	        drawMain();
+	    else
+	        drawBack();
+	    drawImGui(main_window);
+		glFinish();
+		glfwSwapBuffers(main_window);
+
+		glfwMakeContextCurrent(aux_window);
+		drawAux();
+		drawImGui(aux_window);
+		glFinish();
+		glfwSwapBuffers(aux_window);
+		
+	} while( (not glfwWindowShouldClose(main_window)) and (not glfwWindowShouldClose(aux_window)) );
+}
+
+
+// ===== pasos del renderizado =====
+
+void drawMain() {
+	glEnable(GL_DEPTH_TEST);
+	glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+	
+	texture.bind();
+	shader_main.use();
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	setMatrixes(main_window, shader_main);
+	shader_main.setLight(glm::vec4{-1.f,1.f,4.f,1.f}, glm::vec3{1.f,1.f,1.f}, 0.35f);
+	shader_main.setMaterial(model_chookity.material);
+	shader_main.setBuffers(model_chookity.buffers);
+	model_chookity.buffers.draw();
+}
+
+void drawAux() {
+	glDisable(GL_DEPTH_TEST);
+	texture.bind();
+	shader_aux.use();
+	shader_aux.setMatrixes(glm::mat4{1.f}, glm::mat4{1.f}, glm::mat4{1.f});
+	shader_aux.setBuffers(model_aux.buffers);
+	model_aux.buffers.draw();
+}
+
+void drawBack() {
+	glfwMakeContextCurrent(main_window); // asegurarse de que estamos en la ventana principal
+	glDisable(GL_MULTISAMPLE); // para que se vea "pixelado"
+	
+	glEnable(GL_DEPTH_TEST);
+	glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+	
+	texture.bind();
+	shader_back.use();
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	setMatrixes(main_window, shader_back);
+//	shader_back.setLight(glm::vec4{-1.f,1.f,4.f,1.f}, glm::vec3{1.f,1.f,1.f}, 0.35f);
+//	shader_back.setMaterial(model_chookity.material);
+//	shader_back.setBuffers(model_chookity.buffers);
+	model_chookity.buffers.draw();
+	
+	glEnable(GL_MULTISAMPLE); // para que no se vea tan "pixelado"
+	glFlush(); // asegura que se ha terminado de dibujar
+	glFinish(); // asegura que se ha terminado de dibujar
+
+    
+}
+
+void drawImGui(Window &window) {
+	if (!glfwGetWindowAttrib(window, GLFW_FOCUSED)) return;
+	// settings sub-window
+	window.ImGuiDialog("Settings",[&](){
+	    ImGui::Checkbox("DrawMain", &show_drawMain);
+		ImGui::SliderFloat("Radius",&radius,1,50);
+		//Sliders para el rgba...
+		ImGui::SliderFloat("R",&(color[0]),0,1);
+		ImGui::SliderFloat("G",&(color[1]),0,1);
+		ImGui::SliderFloat("B",&(color[2]),0,1);
+		ImGui::SliderFloat("A",&(color[3]),0,1);
+
+		static std::vector<std::pair<const char *, ImVec4>> pallete = { // colores predefindos
+			{"white" , {1.f,1.f,1.f,1.f}},
+			{"pink"  , {0.749f,0.49f,0.498f,1.f}},
+			{"yellow", {0.965f,0.729f,0.106f,1.f}},
+			{"black" , {0.f,0.f,0.f,1.f}} };
+		
+		ImGui::Text("Pallete:");
+		for (auto &p : pallete) {
+			ImGui::SameLine();
+			if (ImGui::ColorButton(p.first, p.second))
+				color[0] = p.second.x, color[1] = p.second.y, color[2] = p.second.z;
+		}
+		
+		if (ImGui::Button("Reload Image")) {
+			image = Image("models/chookity.png",true);
+			texture.update(image);
+		}
+	});
+}
+
+
+
+// ===== callbacks de la ventana auxiliar (textura) =====
+
+void auxMouseButtonCallback(GLFWwindow* window, int button, int action, int mods) {
+	if (ImGui::GetIO().WantCaptureMouse) return; //imgui
+	if (action==GLFW_PRESS) {
+		mouse_action = MouseAction::Draw;
+		
+		/// @ToDo: Parte 1: pintar un punto de radio "radius" en la imagen
+		///                 "image" que se usa como textura
+		
+		// Dibuja
+		drawLine(cposition, cposition, true);
+		texture.update(image);
+	} else {
+		mouse_action = MouseAction::None;
+	}
+}
+
+void auxMouseMoveCallback(GLFWwindow* window, double xpos, double ypos) {
+	
+	BufferSize bs = getBufferSize(window);
+	
+	// Actualiza position antigua y actual al mover
+	
+	oposition.x = cposition.x;
+	oposition.y = cposition.y;
+	cposition.x = (xpos/bs.width)*image.GetHeight(); 
+	cposition.y = image.GetHeight()-(ypos/bs.height)*image.GetHeight();
+
+	
+	if (mouse_action!=MouseAction::Draw) return;
+	
+
+	/// @ToDo: Parte 1: pintar un segmento de ancho "2*radius" en la imagen
+	///                 "image" que se usa como textura
+	
+	// Dibuja
+	
+	drawLine(oposition, cposition, false);
+	texture.update(image);
+
+	
+}
+
+
+// ===== callbacks de la ventana principal (vista 3D) =====
+
+void mainMouseButtonCallback(GLFWwindow* window, int button, int action, int mods) {
+	
+	
+	if (ImGui::GetIO().WantCaptureMouse) return;
+	if (action==GLFW_PRESS) {
+		if (mods!=0 or button==GLFW_MOUSE_BUTTON_RIGHT) {
+			mouse_action = MouseAction::ManipulateView;
+			common_callbacks::mouseButtonCallback(window, GLFW_MOUSE_BUTTON_LEFT, action, mods);
+			return;
+		}
+		
+		mouse_action = MouseAction::Draw;
+		
+		/// @ToDo: Parte 2: pintar un punto de radio "radius" en la imagen
+		///                 "image" que se usa como textura
+//		glReadBuffer(GL_DEPTH);
+//		float depth;
+//		glReadPixels((int)modelPosition.x, (int)modelPosition.y, 0, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &depth);
+//
+//
+		drawBack();
+		glReadBuffer(GL_BACK);
+		glm::vec4 color_value;
+		glReadPixels(cmodelPosition.x,cmodelPosition.y,1,1, GL_RGBA, GL_FLOAT, &(color_value[0]));
+		
+		Punto p1;
+		p1.x = color_value.r * 1024;
+		p1.y = color_value.g * 1024;
+		drawLine(p1, p1, true);
+		texture.update(image);
+		
+
+
+
+	} else {
+		if (mouse_action==MouseAction::ManipulateView)
+			common_callbacks::mouseButtonCallback(window, GLFW_MOUSE_BUTTON_LEFT, action, mods);
+		mouse_action = MouseAction::None;
+	}
+}
+
+void mainMouseMoveCallback(GLFWwindow* window, double xpos, double ypos) {
+	BufferSize bs = getBufferSize(window);
+	
+	// Actualiza position antigua y actual al mover
+	
+	omodelPosition.x = cmodelPosition.x;
+	omodelPosition.y = cmodelPosition.y;
+	
+	cmodelPosition.x = xpos; 
+	cmodelPosition.y = bs.height-ypos-1;
+//	cmodelPosition.y = ypos;
+	
+	
+	
+	if (mouse_action!=MouseAction::Draw) {
+		if (mouse_action==MouseAction::ManipulateView);
+			common_callbacks::mouseMoveCallback(window,xpos,ypos);
+		return; 
+	}
+	
+	/// @ToDo: Parte 2: pintar un segmento de ancho "2*radius" en la imagen
+	///                 "image" que se usa como textura
+	drawBack();
+//	
+//	glReadBuffer(GL_DEPTH);
+//	float depth;
+//	glReadPixels((int)cmodelPosition.x, (int)cmodelPosition.y, 0, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &depth);
+//
+	glReadBuffer(GL_BACK);
+	glm::vec4 color_value;
+	glReadPixels(cmodelPosition.x,cmodelPosition.y,1,1, GL_RGBA, GL_FLOAT, &(color_value[0]));
+	
+	Punto p1;
+	p1.x = color_value.r * 1024;
+	p1.y = color_value.g * 1024;
+	
+	glReadPixels(omodelPosition.x,omodelPosition.y,1,1, GL_RGBA, GL_FLOAT, &(color_value[0]));
+	
+	
+	Punto p2;
+	p2.x = color_value.r * 1024;
+	p2.y = color_value.g * 1024;
+	
+	drawLine(p2, p1, false);
+	texture.update(image);
+
+//  printf("Model position: %f, %f\n", cmodelPosition.x, cmodelPosition.y);	
+//	printf("Model s t: %f, %f\n", p.x, p.y);
+	
+}
+
+void drawLine(Punto p1, Punto p2, bool flag){
+	// dda :p
+
+	// Caso punto de radio = radius
+	
+	if(flag){
+		Punto centro = {p1.x,p1.y};
+		drawCircle(centro,1);
+		return;
+	}
+	
+	
+	// Caso "segmento" de radio = 2*radius
+//	std::cout<<p1.x<<" "<<p1.y<<" y "<<p2.x<<" "<<p2.y<<std::endl;
+	float dx = p2.x-p1.x;
+	float dy = p2.y-p1.y;
+	
+	if(abs(dx) >= abs(dy)){
+		if(dx<0){
+			Punto aux = p1;
+			p1 = p2;
+			p2 = aux;
+		}
+		
+		int x = floor(p1.x);
+		float y = p1.y;
+		int x2 = ceil(p2.x);
+
+		
+		if(x==x2){
+			Punto centro = {x,y};
+			drawCircle(centro,0);
+			return;
+			
+		}
+		
+		float m = dy/dx;
+		
+		while((++x)<=x2){
+			y += m;
+			Punto centro = {x,y};
+			drawCircle(centro,0);
+			
+		}
+
+		
+	} else {
+		if(dy<0){
+			Punto aux = p1;
+			p1 = p2;
+			p2 = aux;
+		}
+		int y = floor(p1.y);
+		float x = p1.x;
+		int y2 = ceil(p2.y);
+		
+		if(y==y2){
+			Punto centro = {x,y};
+			drawCircle(centro,0);
+			return;
+			
+		}
+		
+		float m = dx/dy;
+
+		while((++y)<=y2){
+			x += m;
+			Punto centro = {x,y};
+			drawCircle(centro,0);
+		}
+	}
+	
+}
+
+void drawCircle(Punto p, bool fix){
+	//dibuja un circulo con centro en p...
+	
+	float alpha = color.a;
+	glm::vec4 out_color;
+	glm::vec4 new_color;
+	glm::vec3 old_color;
+	new_color.a = 1;
+	/// si fix = 1 --> aux_radius = radius
+	/// si fix = 0 --> aux_radius = 2*radius
+	
+	// Los circulos se acumulan y el alpha se pierde.. esto lo "arregla"..
+	float k = 0.05f; 
+	float effectiveAlpha = 1.0f - pow(1.0f - alpha, k);
+	
+	fix = true;
+	
+	int aux_radius = radius*fix + 2*radius*(!fix);
+
+	for (int y = p.y-aux_radius; y <= p.y+aux_radius; y++) {
+		for (int x = p.x-aux_radius; x <= p.x+aux_radius; x++) {
+			if ((x-p.x)*(x-p.x) + (y-p.y)*(y-p.y) <= aux_radius*aux_radius) {
+				//pinta si el punto esta dentro de la circunferencia...
+				//osea respeta la ecuacion del circulo: x^2 + y^2 = r^2
+				
+				if((y<1024) && (y > 0) && (x<1024) && (x > 0)){
+				
+					//interpola el color viejo y el nuevo con el alpha.
+					
+					new_color.r = effectiveAlpha*color.r;
+					new_color.g = effectiveAlpha*color.g;
+					new_color.b = effectiveAlpha*color.b;
+					//new_color.a = 1;
+					
+					old_color = image.GetRGB(y,x);
+					
+					out_color.r = new_color.r + (1.0f - effectiveAlpha) * old_color.r;
+					out_color.g = new_color.g + (1.0f - effectiveAlpha) * old_color.g;
+					out_color.b = new_color.b + (1.0f - effectiveAlpha) * old_color.b;
+					out_color.a = 1;
+					
+					image.SetRGBA(y,x,out_color);
+				}
+			}
+		}
+	}
+}
